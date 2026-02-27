@@ -1,0 +1,590 @@
+<!doctype html>
+<html lang="zh">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Heart ✨ Halo + Type + Burst</title>
+  <style>
+    html, body { margin:0; height:100%; background:#000; overflow:hidden; }
+    canvas { display:block; width:100%; height:100%; }
+
+    #msg{
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%) scale(0.9);
+      color: #E5A0B1; /* ✅ 柔粉 */
+      font-size: clamp(28px, 5vw, 56px);
+      font-weight: 300;
+      letter-spacing: 2px;
+      text-align: center;
+      text-shadow:
+        0 0 10px rgba(229,160,177,0.85),
+        0 0 22px rgba(229,160,177,0.55),
+        0 0 44px rgba(229,160,177,0.35);
+      opacity: 0;
+      pointer-events: none;
+      white-space: nowrap;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+    #msg.show{
+      animation: fadeIn 1.05s ease forwards, glow 3s ease-in-out infinite 1.05s;
+    }
+    @keyframes fadeIn{
+      to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+    }
+    @keyframes glow{
+      0%,100% { opacity: .85; }
+      50%     { opacity: 1; }
+    }
+
+    /* 打字机光标 */
+    #msg.typing::after{
+      content: "▍";
+      margin-left: 4px;
+      color: rgba(229,160,177,0.9);
+      animation: blink 0.8s steps(1) infinite;
+    }
+    @keyframes blink{ 50%{ opacity: 0; } }
+
+    /* 用于测量每个字的宽度（不可见） */
+    #measure{
+      position: fixed;
+      top: -9999px;
+      left: -9999px;
+      visibility: hidden;
+      white-space: nowrap;
+      font-weight: 300;
+      letter-spacing: 2px;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+    }
+
+    .hint{
+      position: fixed; left: 14px; bottom: 14px;
+      color: rgba(255,255,255,.55);
+      font: 12px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      user-select:none;
+    }
+    .hint b{ color: rgba(229,160,177,.95); }
+  </style>
+</head>
+<body>
+  <canvas id="c"></canvas>
+
+  <!-- ✅ 改这里的文字 -->
+  <div id="msg" data-text="I ❤️ You"></div>
+  <div id="measure"></div>
+
+  <div class="hint">等爱心变满后点击 ✨</div>
+
+  <script>
+    const canvas = document.getElementById('c');
+    const ctx = canvas.getContext('2d');
+    const msg = document.getElementById('msg');
+    const measure = document.getElementById('measure');
+
+    function resize(){
+      const dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+      canvas.width  = Math.floor(innerWidth  * dpr);
+      canvas.height = Math.floor(innerHeight * dpr);
+      ctx.setTransform(dpr,0,0,dpr,0,0);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    // --- 心形参数方程 ---
+    function heart(t){
+      const x = 16 * Math.pow(Math.sin(t), 3);
+      const y = 13*Math.cos(t) - 5*Math.cos(2*t) - 2*Math.cos(3*t) - Math.cos(4*t);
+      return {x, y};
+    }
+
+    // Box-Muller 正态随机
+    function randn(mean=0, std=1){
+      let u = 1 - Math.random();
+      let v = 1 - Math.random();
+      return mean + std * Math.sqrt(-2*Math.log(u)) * Math.cos(2*Math.PI*v);
+    }
+    function clamp(x, a, b){ return Math.max(a, Math.min(b, x)); }
+
+    // 世界坐标 -> 屏幕坐标
+    function worldToScreen(wx, wy){
+      const w = innerWidth, h = innerHeight;
+      const scale = Math.min(w, h) / 40;
+      return { x: w/2 + wx*scale, y: h/2 - wy*scale };
+    }
+
+    // ✅ 参考图粉色（柔粉）
+    const PINK = { r:229, g:160, b:177 }; // #E5A0B1
+
+    // ✅ 亮度抖动：把基础色按亮度系数缩放（不改变 alpha）
+    function applyBrightness(c, k){
+      return {
+        r: Math.round(clamp(c.r * k, 0, 255)),
+        g: Math.round(clamp(c.g * k, 0, 255)),
+        b: Math.round(clamp(c.b * k, 0, 255)),
+      };
+    }
+
+    // --- Halo（光环）控制 ---
+    let haloOn = false;
+    let haloCenter = { x: innerWidth/2, y: innerHeight/2 };
+    let haloRadius = 120;
+    let haloStrength = 0;
+
+    function updateHaloFromText(){
+      const r = msg.getBoundingClientRect();
+      haloCenter = { x: r.left + r.width/2, y: r.top + r.height/2 };
+      haloRadius = Math.max(90, Math.min(240, r.width*0.65));
+    }
+
+    class Particle{
+      constructor(x,y,vx,vy,size,alpha,tw,life=1){
+        this.x=x; this.y=y;
+        this.vx=vx; this.vy=vy;
+        this.size=size;
+        this.baseAlpha=alpha;
+        this.alpha=alpha;
+        this.tw=tw;
+        this.t0=Math.random()*Math.PI*2;
+        this.life=life;
+        this.decay=0.0015 + Math.random()*0.0025;
+
+        // halo
+        this.halo = false;
+        this.haloSign = Math.random() < 0.5 ? -1 : 1;
+
+        // ✅ 每个粒子自己的亮度系数（初始随机）
+        this.b = 0.88 + Math.random()*0.28;      // 0.88 ~ 1.16
+        this.bWalk = 0.004 + Math.random()*0.006; // 亮度随机游走强度
+        this.bTw = 0.007 + Math.random()*0.016;   // 亮度轻微正弦闪烁
+        this.b0 = Math.random()*Math.PI*2;
+      }
+
+      step(t){
+        // 默认漂浮
+        this.vy += -0.00045;
+
+        if (haloOn && this.halo){
+          const dx = this.x - haloCenter.x;
+          const dy = this.y - haloCenter.y;
+          const d  = Math.hypot(dx, dy) + 1e-6;
+
+          const radialError = (d - haloRadius);
+          const k = 0.0032 * haloStrength;
+          const damp = 0.92;
+
+          const ux = dx / d, uy = dy / d;
+
+          // 拉回目标半径
+          this.vx += -ux * radialError * k;
+          this.vy += -uy * radialError * k;
+
+          // 切向绕圈
+          const tx = -uy, ty = ux;
+          const swirl = 0.07 * haloStrength;
+          this.vx += tx * swirl * this.haloSign;
+          this.vy += ty * swirl * this.haloSign;
+
+          this.vx *= damp;
+          this.vy *= damp;
+
+          // 更亮更久
+          this.decay *= 0.995;
+          this.baseAlpha = Math.min(this.baseAlpha + 0.0012, 0.68);
+        }
+
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // 闪烁
+        this.alpha = this.baseAlpha * (0.55 + 0.45*Math.sin(this.t0 + t*this.tw));
+
+        // ✅ 亮度抖动（随机游走 + 很轻微呼吸）
+        this.b += randn(0, this.bWalk);
+        this.b = clamp(this.b, 0.80, 1.22);
+        const breath = 1.0 + 0.06*Math.sin(this.b0 + t*this.bTw);
+        this._bk = this.b * breath;
+
+        // 消散
+        this.life -= this.decay;
+      }
+
+      draw(){
+        if(this.life<=0) return;
+        const a = Math.max(0,this.alpha) * Math.max(0,this.life);
+
+        const c = applyBrightness(PINK, this._bk ?? 1);
+
+        ctx.beginPath();
+        ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${a})`;
+        ctx.arc(this.x,this.y,this.size,0,Math.PI*2);
+        ctx.fill();
+      }
+    }
+
+    // 两段生命周期的 Burst 粒子：爆开 -> 余辉
+    class BurstParticle{
+      constructor(x,y,vx,vy,size){
+        this.x=x; this.y=y;
+        this.vx=vx; this.vy=vy;
+        this.size=size;
+
+        // phase: 0=爆开, 1=余辉
+        this.phase = 0;
+        this.t = 0;
+
+        // 爆开阶段（短、亮、快）
+        this.blastDuration = 18 + (Math.random()*10|0);  // 帧
+        this.blastAlpha = 0.95;
+        this.blastDecay = 0.045 + Math.random()*0.03;
+
+        // 余辉阶段（长、淡、慢）
+        this.afterDuration = 55 + (Math.random()*35|0); // 帧
+        this.afterAlpha = 0.35 + Math.random()*0.25;
+        this.afterDecay = 0.012 + Math.random()*0.012;
+
+        // 拖尾感：余辉阶段阻尼更强
+        this.dampBlast = 0.985;
+        this.dampAfter = 0.94;
+
+        // 余辉轻微向上漂
+        this.floatUp = -0.0012;
+
+        // 闪烁微扰
+        this.tw = 0.02 + Math.random()*0.04;
+        this.t0 = Math.random()*Math.PI*2;
+
+        // ✅ burst 也带一点亮度抖动（更像烟花闪）
+        this.b = 0.92 + Math.random()*0.26;
+        this.bTw = 0.02 + Math.random()*0.05;
+        this.b0 = Math.random()*Math.PI*2;
+
+        this.life = 1;
+      }
+
+      step(frame){
+        this.t++;
+
+        if (this.phase === 0){
+          this.vy += 0.002;
+          this.vx *= this.dampBlast;
+          this.vy *= this.dampBlast;
+
+          this.x += this.vx;
+          this.y += this.vy;
+
+          this.blastAlpha -= this.blastDecay;
+          if (this.t >= this.blastDuration || this.blastAlpha <= 0){
+            this.phase = 1;
+            this.t = 0;
+            this.vx *= 0.35;
+            this.vy *= 0.35;
+          }
+        } else {
+          this.vy += this.floatUp;
+          this.vx *= this.dampAfter;
+          this.vy *= this.dampAfter;
+
+          this.x += this.vx;
+          this.y += this.vy;
+
+          this.afterAlpha -= this.afterDecay;
+          if (this.t >= this.afterDuration || this.afterAlpha <= 0){
+            this.life = 0;
+          }
+        }
+
+        // ✅ burst 亮度轻微呼吸
+        this._bk = clamp(this.b * (1 + 0.10*Math.sin(this.b0 + frame*this.bTw)), 0.80, 1.30);
+      }
+
+      draw(frame){
+        if (this.life <= 0) return;
+
+        const flicker = 0.75 + 0.25*Math.sin(this.t0 + frame*this.tw);
+
+        let a = (this.phase === 0)
+          ? Math.max(0, this.blastAlpha) * flicker
+          : Math.max(0, this.afterAlpha) * flicker;
+
+        const c = applyBrightness(PINK, this._bk ?? 1);
+
+        ctx.beginPath();
+        ctx.fillStyle = `rgba(${c.r},${c.g},${c.b},${a})`;
+        const r = this.phase === 0 ? this.size : this.size*1.15;
+        ctx.arc(this.x, this.y, r, 0, Math.PI*2);
+        ctx.fill();
+      }
+    }
+
+    const particles = [];
+    const bursts = [];
+
+    // ---------- 生成轮廓星尘 ----------
+    function spawnOutline(){
+      particles.length = 0;
+
+      const N_outline = 4200;
+      const N_spark = 360;
+
+      const outline = [];
+      for(let i=0;i<N_outline;i++){
+        const t = Math.random()*Math.PI*2;
+        const p = heart(t);
+
+        const dt = 0.001;
+        const p2 = heart(t + dt);
+        let tx = p2.x - p.x, ty = p2.y - p.y;
+        const norm = Math.hypot(tx,ty) || 1;
+        tx/=norm; ty/=norm;
+        const nx = -ty, ny = tx;
+
+        const thick = randn(0, 0.22);
+        const tanJ  = randn(0, 0.05);
+
+        const wx = p.x + nx*thick + tx*tanJ;
+        const wy = p.y + ny*thick + ty*tanJ;
+
+        outline.push({wx,wy,nx,ny});
+      }
+
+      for(const o of outline){
+        const s = worldToScreen(o.wx, o.wy);
+        particles.push(new Particle(
+          s.x, s.y,
+          randn(0,0.07), randn(0,0.07),
+          0.6 + Math.random()*2.6,
+          0.12 + Math.random()*0.45,
+          0.006 + Math.random()*0.010,
+          1
+        ));
+      }
+
+      for(let i=0;i<N_spark;i++){
+        const o = outline[(Math.random()*outline.length)|0];
+        const kick = randn(0, 0.85);
+        const wx = o.wx + o.nx*kick + randn(0,0.15);
+        const wy = o.wy + o.ny*kick + randn(0,0.15);
+        const s = worldToScreen(wx, wy);
+
+        particles.push(new Particle(
+          s.x, s.y,
+          randn(0,0.10), randn(0,0.10),
+          0.6 + Math.random()*3.6,
+          0.06 + Math.random()*0.30,
+          0.008 + Math.random()*0.014,
+          1
+        ));
+      }
+    }
+
+    // ---------- 爱心慢慢变满 ----------
+    let fillProgress = 0;
+    const FILL_SECONDS = 8.0;
+
+    function addInnerDust(strength){
+      const base = 3;
+      const extra = Math.floor(30 * strength * strength);
+      const count = base + extra;
+
+      for(let i=0;i<count;i++){
+        const t = Math.random()*Math.PI*2;
+        const p = heart(t);
+
+        const minS = 0.18 + 0.22*(1-strength);
+        const maxS = 0.85;
+        const scale = minS + Math.random()*(maxS - minS);
+
+        const wx = p.x*scale + randn(0, 0.22);
+        const wy = p.y*scale + randn(0, 0.22);
+        const s = worldToScreen(wx, wy);
+
+        particles.push(new Particle(
+          s.x, s.y,
+          randn(0,0.04), randn(0,0.04),
+          0.5 + Math.random()*1.8,
+          0.03 + Math.random()*0.14,
+          0.010 + Math.random()*0.020,
+          0.9
+        ));
+      }
+    }
+
+    // ---------- 两段 burst：爆开 + 余辉 ----------
+    function burstAt(x, y, intensity = 1){
+      const n = Math.floor(22 + 36*intensity);
+
+      for(let i=0;i<n;i++){
+        const ang = Math.random()*Math.PI*2;
+        const spd = (1.4 + Math.random()*2.6) * (0.65 + 0.7*intensity);
+        const vx = Math.cos(ang) * spd * 0.70 + randn(0,0.10);
+        const vy = Math.sin(ang) * spd * 0.70 + randn(0,0.10);
+        const size = 0.7 + Math.random()*2.6;
+
+        bursts.push(new BurstParticle(
+          x + randn(0, 1.6),
+          y + randn(0, 1.6),
+          vx, vy, size
+        ));
+      }
+
+      // 额外加一点“余辉雾”点（更柔的光晕）
+      const haze = Math.floor(8 + 10*intensity);
+      for(let i=0;i<haze;i++){
+        const ang = Math.random()*Math.PI*2;
+        const spd = (0.3 + Math.random()*0.8) * (0.6 + 0.6*intensity);
+        const vx = Math.cos(ang) * spd * 0.25 + randn(0,0.04);
+        const vy = Math.sin(ang) * spd * 0.25 + randn(0,0.04);
+
+        particles.push(new Particle(
+          x + randn(0, 6.5),
+          y + randn(0, 6.5),
+          vx, vy,
+          1.2 + Math.random()*2.8,
+          0.06 + Math.random()*0.14,
+          0.012 + Math.random()*0.025,
+          0.55 + Math.random()*0.35
+        ));
+      }
+    }
+
+    // ---------- 打字机：测量字尾位置 + 每字 burst ----------
+    function syncMeasureFont(){
+      const cs = getComputedStyle(msg);
+      measure.style.fontSize = cs.fontSize;
+      measure.style.fontWeight = cs.fontWeight;
+      measure.style.letterSpacing = cs.letterSpacing;
+      measure.style.fontFamily = cs.fontFamily;
+    }
+
+    function getCaretScreenPos(prefixText){
+      syncMeasureFont();
+      const r = msg.getBoundingClientRect();
+      measure.textContent = prefixText;
+      const w = measure.getBoundingClientRect().width;
+      return { x: r.left + w, y: r.top + r.height*0.56 };
+    }
+
+    function typeTextWithBursts(el, fullText, speed = 95){
+      el.textContent = "";
+      el.classList.add("typing");
+      let i = 0;
+
+      return new Promise((resolve) => {
+        const timer = setInterval(() => {
+          i++;
+          const shown = fullText.slice(0, i);
+          el.textContent = shown;
+
+          const p = getCaretScreenPos(shown);
+          const ch = fullText[i-1];
+          const intensity = (ch === "❤️") ? 1.55 : 1.0;
+          burstAt(p.x, p.y, intensity);
+
+          if (i >= fullText.length){
+            clearInterval(timer);
+            el.classList.remove("typing");
+            resolve();
+          }
+        }, speed);
+      });
+    }
+
+    // ---------- 点击后：打字 -> 光环 ----------
+    let shown = false;
+
+    function enableHalo(){
+      haloOn = true;
+
+      const ratio = 0.24;
+      for(const p of particles){
+        p.halo = Math.random() < ratio;
+        if (p.halo){
+          p.baseAlpha = Math.min(p.baseAlpha + 0.18, 0.75);
+          p.size = Math.min(p.size + 0.6, 5.2);
+          p.vx += randn(0, 0.35);
+          p.vy += randn(0, 0.35);
+        }
+      }
+
+      haloStrength = 0;
+      updateHaloFromText();
+    }
+
+    window.addEventListener('pointerdown', async () => {
+      if (shown) return;
+      if (fillProgress < 0.75) return;
+
+      shown = true;
+      msg.classList.add('show');
+
+      const text = msg.getAttribute("data-text") || "I ❤️ You";
+
+      await new Promise(r => requestAnimationFrame(r));
+      await typeTextWithBursts(msg, text, 65);
+
+      requestAnimationFrame(() => {
+        updateHaloFromText();
+        enableHalo();
+      });
+    });
+
+    window.addEventListener('resize', () => {
+      if (shown) updateHaloFromText();
+    });
+
+    // ---------- 动画循环 ----------
+    let last = performance.now();
+    let tick = 0;
+
+    function loop(now){
+      const dt = (now - last) / 1000;
+      last = now;
+      tick++;
+
+      // 背景拖尾（不要清太干净）
+      ctx.fillStyle = "rgba(0,0,0,0.20)";
+      ctx.fillRect(0,0,innerWidth,innerHeight);
+
+      // 慢慢变满
+      fillProgress = Math.min(1, fillProgress + dt / FILL_SECONDS);
+      addInnerDust(fillProgress);
+
+      // 光环强度缓动上升
+      if (haloOn){
+        haloStrength = Math.min(1, haloStrength + dt * 0.85);
+        updateHaloFromText();
+      }
+
+      // 先画 burst
+      for(let i=bursts.length-1;i>=0;i--){
+        const b = bursts[i];
+        b.step(tick);
+        b.draw(tick);
+        if (b.life <= 0) bursts.splice(i,1);
+      }
+
+      // 再画普通星尘
+      for(let i=particles.length-1;i>=0;i--){
+        const p = particles[i];
+        p.step(tick);
+        p.draw();
+        if (p.life <= 0) particles.splice(i,1);
+      }
+
+      // 维持轮廓
+      const minCount = haloOn ? 1800 : 2400;
+      if (particles.length < minCount) spawnOutline();
+
+      requestAnimationFrame(loop);
+    }
+
+    // 初始化
+    ctx.fillStyle = "#000";
+    ctx.fillRect(0,0,innerWidth,innerHeight);
+    spawnOutline();
+    requestAnimationFrame(loop);
+  </script>
+</body>
+</html>
