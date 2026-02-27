@@ -72,7 +72,7 @@
   <canvas id="c"></canvas>
 
   <!-- ✅ 改这里的文字 -->
-  <div id="msg" data-text="I ❤️ You"></div>
+  <div id="msg" data-text="小依依小懒虫🤭"></div>
   <div id="measure"></div>
 
   <div class="hint">等爱心变满后点击 ✨</div>
@@ -519,7 +519,7 @@
       shown = true;
       msg.classList.add('show');
 
-      const text = msg.getAttribute("data-text") || "I ❤️ You";
+      const text = msg.getAttribute("data-text") || "小依依小懒虫🤭";
 
       await new Promise(r => requestAnimationFrame(r));
       await typeTextWithBursts(msg, text, 65);
@@ -587,4 +587,5 @@
     requestAnimationFrame(loop);
   </script>
 </body>
+
 </html>
